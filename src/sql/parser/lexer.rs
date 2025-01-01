@@ -1,4 +1,4 @@
-use std::{collections::btree_map::Values, fmt::Display, iter::Peekable, str::Chars};
+use std::{fmt::Display, iter::Peekable, str::Chars};
 use crate::error::{Error, Result};
 
 
@@ -81,7 +81,7 @@ impl Keyword {
             "VARCHAR" => Keyword::Varchar,
             "FLOAT" => Keyword::Float,
             "DOUBLE" => Keyword::Double,
-            "SELECT" => Keyword::String,
+            "SELECT" => Keyword::Select,
             "FROM" => Keyword::From,
             "INSERT" => Keyword::Insert,
             "INTO" => Keyword::Into,
@@ -219,7 +219,7 @@ impl<'a> Lexer<'a> {
         self.skip_whitespace();
 
         match self.iter.peek() {
-            Some('\'') => self.scan_string(),
+            Some('\'') => self.scan_string(), // insert single quotation mark
             Some(c) if c.is_ascii_digit() => Ok(self.scan_number()),
             Some(c) if c.is_alphabetic() => Ok(self.scan_ident()),
             Some(_) => Ok(self.scan_symbol()),
@@ -310,7 +310,7 @@ mod tests {
                 id1 int primary key,
                 id2 string
             );
-            ",
+            "
         )
         .peekable()
         .collect::<Result<Vec<_>>>()?;
@@ -337,4 +337,4 @@ mod tests {
         Ok(())
     }
 
-}
+} 
