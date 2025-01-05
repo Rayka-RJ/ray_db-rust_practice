@@ -175,8 +175,9 @@ impl<'a> Parser<'a> {
         })
     }
 
-
-    // Auxiliary method
+    // -+------------------------+-
+    //      Auxilliary Part
+    // -+------------------------+- 
 
     fn peek(&mut self) -> Result<Option<Token>> {
         self.lexer.peek().cloned().transpose()
