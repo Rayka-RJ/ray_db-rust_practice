@@ -43,8 +43,8 @@ pub trait EngineIterator: DoubleEndedIterator<Item = Result<(Vec<u8>, Vec<u8>)>>
 #[cfg(test)]
 mod tests {
     use super::Engine;
-    use crate::{error::Result, storage::memory::MemoryEngine};
-    use std::{ops::Bound};
+    use crate::{error::Result, storage::{disk::DiskEngine, memory::MemoryEngine}};
+    use std::{ops::Bound, path::PathBuf};
 
     // Point query
     fn test_point_opt(mut eng: impl Engine) -> Result<()> {
@@ -124,4 +124,13 @@ mod tests {
         test_prefix_scan(MemoryEngine::new())?;
         Ok(())
     } 
+
+    // Disk Engine
+    #[test]
+    fn test_disk_engine() -> Result<()> {
+        test_point_opt(DiskEngine::new(PathBuf::from("/tmp/db/db.log"))?)?;
+        test_scan(DiskEngine::new(PathBuf::from("/tmp/db/db.log"))?)?;
+        test_prefix_scan(DiskEngine::new(PathBuf::from("/tmp/db//db.log"))?)?;
+        Ok(())
+    }
 }
