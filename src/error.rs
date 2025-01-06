@@ -1,6 +1,7 @@
-use std::sync::PoisonError;
+use std::{fmt::Display, sync::PoisonError};
 
 use bincode::ErrorKind;
+use serde::{de, ser};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -9,6 +10,16 @@ pub enum Error {
     Parse(String),
     Internal(String),
     WriteConflict,
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Parse(err) => write!(f, "Parse error {}", err),
+            Error::Internal(err) => write!(f, "Internal error {}", err),
+            Error::WriteConflict => write!(f, "Write conflict, try transaction"),
+        }
+    }
 }
 
 impl From<std::num::ParseIntError> for Error {
@@ -41,3 +52,21 @@ impl From<std::io::Error> for Error {
         Error::Internal(value.to_string())
     }
 }
+
+
+// Serde Error implement
+
+impl std::error::Error for Error {}
+
+impl ser::Error for Error {
+    fn custom<T: Display>(msg: T) -> Self {
+        Error::Internal(msg.to_string())
+    }
+}
+
+impl de::Error for Error {
+    fn custom<T>(msg:T) -> Self where T:Display {
+        Error::Internal(msg.to_string())
+    }
+}
+

@@ -1,4 +1,4 @@
-use std::{collections::{HashMap, HashSet}, sync::{Arc, Mutex, MutexGuard}};
+use std::{collections::{HashMap, HashSet}, sync::{Arc, Mutex, MutexGuard}, u64};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -36,19 +36,42 @@ pub struct TransactionState {
     pub active_versions: HashSet<Version>,
 }
 
+impl TransactionState {
+    fn is_visible(&self, version: Version) -> bool {
+        if self.active_versions.contains(&version) {
+            return false;
+        } else {
+            return version <= self.version;
+        }
+    }
+}
+
 pub type Version = u64;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum MvccKey {
     NextVersion,
     TxnActive(Version),
-    Version(Vec<u8>, Version),
+    TxnWrite(
+        Version, 
+        #[serde(with = "serde_bytes")]        
+        Vec<u8>),
+    Version(
+        #[serde(with = "serde_bytes")]
+        Vec<u8>, 
+        Version
+    ),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum MvccKeyPrefix {
     NextVersion,
     TxnActive,
+    TxnWrite(Version),
+    Version(
+        #[serde(with = "serde_bytes")]
+        Vec<u8>
+    )
 }
 
 impl MvccKeyPrefix {
@@ -107,22 +130,95 @@ impl<E: Engine> MvccTransaction<E> {
         )
     }
 
+    // Txn Commit
     pub fn commit(&self) -> Result<()> {
+        // Get the storage engine
+        let mut engine = self.engine.lock()?;
+        
+        let mut delete_keys = Vec::new();
+
+        // Get the current TxnWrite
+        let mut iter = engine.scan_prefix(MvccKeyPrefix::TxnWrite(self.state.version).encode());
+        while let Some((key, _)) = iter.next().transpose()?{
+            delete_keys.push(key);
+        }
+        // Release the RefCall borrow
+        drop(iter);
+
+        for key in delete_keys.into_iter() {
+            engine.delete(key)?;
+        }
+
+        // Delete from active_txn
+        engine.delete(MvccKey::TxnActive(self.state.version).encode())?;
         Ok(())
     }
 
+    // Txn Rollback
     pub fn rollback(&self) -> Result<()> {
+        // Obtain engine
+        let mut engine = self.engine.lock()?;
+
+        let mut delete_keys = Vec::new();
+
+        // Find the current TxnWrite info
+        let mut iter = engine.scan_prefix(MvccKeyPrefix::TxnWrite(self.state.version).encode());
+        while let Some((key, _)) = iter.next().transpose()? {
+            match MvccKey::decode(key.clone())? {
+                MvccKey::TxnWrite(_, raw_key) => {
+                    delete_keys.push(MvccKey::Version(raw_key, self.state.version).encode());
+                }
+                _ => {
+                    return Err(Error::Internal(format!("Unexpected key: {:?}", String::from_utf8(key))))
+                }
+            }
+            delete_keys.push(key);
+        }
+
+        drop(iter);
+
+        // Delete from active txn
+        for key in delete_keys.into_iter() {
+            engine.delete(key)?;
+        }
+
+        engine.delete(MvccKey::TxnActive(self.state.version).encode())?;
+
         Ok(())
     }
 
     pub fn set(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
-        let mut eng = self.engine.lock()?;
-        eng.set(key, value)
+        self.write_inner(key, Some(value))
+    }
+
+    pub fn delete(&self, key: Vec<u8>) -> Result<()> {
+        self.write_inner(key, None)
     }
 
     pub fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
-        let mut eng = self.engine.lock()?;
-        eng.get(key)
+        // Get the storage engine
+        let mut engine = self.engine.lock()?;
+
+        // Version: 9
+        // Scan range: 0 - 9
+        let from = MvccKey::Version(key.clone(), 0).encode();
+        let to = MvccKey::Version(key.clone(), self.state.version).encode();
+        let mut iter = engine.scan(from..=to).rev();
+
+        // Start from latest, find the latest visible
+        while let Some((key, value)) = iter.next().transpose()? {
+            match MvccKey::decode(key.clone())? {
+                MvccKey::Version(_, version) => {
+                    if self.state.is_visible(version) {
+                        return Ok(bincode::deserialize(&value)?);
+                    }
+                }
+                _ => {
+                    return Err(Error::Internal(format!("Unexpected key: {:?}", String::from_utf8(key))));
+                }
+            }
+        }
+        Ok(None)
     }
 
     pub fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Vec<ScanResult>> {
@@ -140,13 +236,42 @@ impl<E: Engine> MvccTransaction<E> {
     // -+------------------------+- 
 
     // Update/Delete data
-    fn while_inner(&self, key: Vec<u8>, value: Option<Vec<u8>>) -> Result<()> {
+    fn write_inner(&self, key: Vec<u8>, value: Option<Vec<u8>>) -> Result<()> {
         // Obtain the storage engine
         let mut engine = self.engine.lock()?;
 
         // Check the conflicts
-        // 
+        // 3 4 5 
+        // 6
+        // key1-3 key2-4 key3-5
+        let from = MvccKey::Version(key.clone(), self.state.active_versions.iter().min().copied().unwrap_or(self.state.version + 1)).encode();
+        let to = MvccKey::Version(key.clone(), u64::MAX).encode();
 
+        // Current actice: 3 4 5 
+        // Current txn 6
+        // Only the last version 
+        // 1. Key follows the sequence from small to large
+        // 2. If there is a new txn changing the key, such as txn 10, then update by txn 6 is conflict
+        // 3. If the current actice txn 4 updated the key, then txn after like txn 5 is unable to update the key
+        if let Some((k, _)) = engine.scan(from..=to).last().transpose()? {
+            match MvccKey::decode(k.clone())? {
+                MvccKey::Version(_, version) => {
+                    // Check if the version visable
+                    if !self.state.is_visible(version) {
+                        return Err(Error::WriteConflict);
+                    }
+                }
+                _ => {
+                    return Err(Error::Internal(format!("Unexpected key: {:?}", String::from_utf8(k))))
+                }
+            }
+        } 
+
+        // Record all the key written in by the version, for rollback
+        engine.set(MvccKey::TxnWrite(self.state.version, key.clone()).encode(), vec![])?;
+
+        // Write in actual (key, value)
+        engine.set(MvccKey::Version(key.clone(), self.state.version).encode(), bincode::serialize(&value)?)?;
         Ok(())
     }
 
