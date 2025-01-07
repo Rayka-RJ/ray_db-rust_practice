@@ -1,7 +1,7 @@
-use serde::ser;
-use crate::error::{Result, Error};
+use serde::{de::{self, IntoDeserializer}, ser};
+use crate::error::{Error, Result};
 
-pub fn serialize<T: serde::Serialize>(key: &T) -> Result<Vec<u8>> {
+pub fn serialize_key<T: serde::Serialize>(key: &T) -> Result<Vec<u8>> {
     let mut ser = Serializer { output: Vec::new() };
     key.serialize(&mut ser)?;
     Ok(ser.output)
@@ -253,28 +253,331 @@ impl<'a> ser::SerializeTupleVariant for &'a mut Serializer {
     }
 }
 
+
+// Deserializer
+
+pub fn deserialize_key<'d, T: serde::Deserialize<'d>>(input: &'d [u8]) -> Result<T> {
+    let mut der = Deserializer { input };
+    T::deserialize(&mut der)
+}
+
+pub struct Deserializer<'d> {
+    input: &'d [u8],
+}
+
+
+impl<'d> Deserializer<'d>  {
+    fn take_bytes(&mut self, len: usize) -> &[u8] {
+        let bytes = &self.input[..len];
+        self.input = &self.input[len..];
+        bytes
+    }
+
+    // - if 255 after0, it is 0 in original string
+    // - if 0 after 0, it is end of string
+    fn next_bytes(&mut self) -> Result<Vec<u8>> {
+        let mut res = Vec::new();
+        let mut iter = self.input.iter().enumerate();
+        let i = loop {
+            match iter.next() {
+                Some((_, 0)) => match iter.next() {
+                    Some((i, 0)) => break i + 1,
+                    Some((i, 255)) => res.push(0),
+                    _ => return Err(Error::Internal("Unexpected input".into())),
+                },
+                Some((_, b)) => res.push(*b), // Non zero value
+                _ => return Err(Error::Internal("Unexpected input".into())),
+            }
+        };
+        self.input = &self.input[i..];
+        Ok(res)
+    }
+}
+
+impl<'a, 'd> de::Deserializer<'d> for &'a mut Deserializer<'d> {
+
+    type Error = Error;
+    
+    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        todo!()
+    }
+    
+    fn deserialize_bool<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        todo!()
+    }
+    
+    fn deserialize_i8<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        todo!()
+    }
+    
+    fn deserialize_i16<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        todo!()
+    }
+    
+    fn deserialize_i32<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        todo!()
+    }
+    
+    fn deserialize_i64<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        todo!()
+    }
+    
+    fn deserialize_u8<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        todo!()
+    }
+    
+    fn deserialize_u16<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        todo!()
+    }
+    
+    fn deserialize_u32<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        todo!()
+    }
+    
+    // &[u8] -> Vec<u8>
+    // From TryFrom
+    fn deserialize_u64<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        let bytes = self.take_bytes(8); // u64 for 8 bytes
+        
+        let v = u64::from_be_bytes(bytes.try_into()?);
+        visitor.visit_u64(v)
+    }
+    
+    fn deserialize_f32<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        todo!()
+    }
+    
+    fn deserialize_f64<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        todo!()
+    }
+    
+    fn deserialize_char<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        todo!()
+    }
+    
+    fn deserialize_str<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        todo!()
+    }
+    
+    fn deserialize_string<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        todo!()
+    }
+    
+    fn deserialize_bytes<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        visitor.visit_bytes(&self.next_bytes()?)
+    }
+    
+    fn deserialize_byte_buf<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        visitor.visit_byte_buf(self.next_bytes()?)
+    }
+    
+    fn deserialize_option<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        todo!()
+    }
+    
+    fn deserialize_unit<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        todo!()
+    }
+    
+    fn deserialize_unit_struct<V>(
+        self,
+        name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        todo!()
+    }
+    
+    fn deserialize_newtype_struct<V>(
+        self,
+        name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        todo!()
+    }
+    
+    fn deserialize_seq<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        visitor.visit_seq(self)
+    }
+    
+    fn deserialize_tuple<V>(self, len: usize, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        visitor.visit_seq(self)
+    }
+    
+    fn deserialize_tuple_struct<V>(
+        self,
+        name: &'static str,
+        len: usize,
+        visitor: V,
+    ) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        todo!()
+    }
+    
+    fn deserialize_map<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        todo!()
+    }
+    
+    fn deserialize_struct<V>(
+        self,
+        name: &'static str,
+        fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        todo!()
+    }
+    
+    fn deserialize_enum<V>(
+        self,
+        name: &'static str,
+        variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        visitor.visit_enum(self)
+    }
+    
+    fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        todo!()
+    }
+    
+    fn deserialize_ignored_any<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        todo!()
+    }
+    
+}
+
+impl <'d, 'a> de::SeqAccess<'d> for Deserializer<'d> {
+    type Error=Error;
+
+    fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>>
+    where
+        T: de::DeserializeSeed<'d> {
+        seed.deserialize(self).map(Some)
+    }
+}
+
+impl<'d, 'a> de::EnumAccess<'d> for &mut Deserializer<'d> {
+    type Error = Error;
+
+    type Variant = Self;
+
+    fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self::Variant)>
+    where
+        V: de::DeserializeSeed<'d> {
+        let index = self.take_bytes(1)[0] as u32;
+        let variant_index: Result<_> = seed.deserialize(index.into_deserializer());
+        Ok((variant_index?, self))
+    }
+}
+
+impl<'d, 'a> de::VariantAccess<'d> for &mut Deserializer<'d> {
+    type Error = Error;
+    
+    fn unit_variant(self) -> Result<()> {
+        Ok(())
+    }
+    
+    fn newtype_variant_seed<T>(self, seed: T) -> Result<T::Value>
+    where
+        T: de::DeserializeSeed<'d> {
+        seed.deserialize(&mut *self)
+    }
+    
+    fn tuple_variant<V>(self, len: usize, visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        visitor.visit_seq(self)
+    }
+    
+    fn struct_variant<V>(
+        self,
+        fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value>
+    where
+        V: de::Visitor<'d> {
+        todo!()
+    }
+}
+
 #[cfg(test)]
 
 mod tests {
-    use super::serialize;
+    use super::{serialize_key, deserialize_key};
 
     use crate::storage::mvcc::{MvccKey, MvccKeyPrefix};
 
     #[test]
     fn test_encode() {
         let k = MvccKey::NextVersion;
-        let v = serialize(&k).unwrap();
+        let v = serialize_key(&k).unwrap();
         println!("{:?}", v);
 
         let k = MvccKey::Version(b"abc".to_vec(), 11);
-        let v = serialize(&k).unwrap();
+        let v = serialize_key(&k).unwrap();
         println!("{:?}", v);
     }
 
     #[test]
     fn test_encode_2() {
         let ser_cmp = |k : MvccKey, v: Vec<u8>| {
-            let res = serialize(&k).unwrap();
+            let res = serialize_key(&k).unwrap();
             assert_eq!(res, v)
         };
 
@@ -288,12 +591,33 @@ mod tests {
     #[test]
     fn test_encode_prefix() {
         let ser_cmp = |k : MvccKeyPrefix, v: Vec<u8>| {
-            let res = serialize(&k).unwrap();
+            let res = serialize_key(&k).unwrap();
             assert_eq!(res, v)
         };
         ser_cmp(MvccKeyPrefix::NextVersion, vec![0]);
         ser_cmp(MvccKeyPrefix::TxnActive, vec![1]);
         ser_cmp(MvccKeyPrefix::TxnWrite(1), vec![2, 0, 0, 0, 0, 0, 0, 0, 1]);
         ser_cmp(MvccKeyPrefix::Version(b"ab".to_vec()), vec![3, 97, 98, 0, 0]); // without value
+    }
+
+    #[test]
+    fn test_u8_convert() {
+        let v = [1 as u8, 2, 3];
+        let vv = &v;
+        let vvv: Vec<u8> = vv.try_into().unwrap();
+        println!("{:?}", vvv)
+    }
+
+    #[test]
+    fn test_decode() {
+        let der_cmp = |k: MvccKey, v: Vec<u8>| {
+            let res: MvccKey = deserialize_key(&v).unwrap();
+            assert_eq!(res, k);
+        };
+
+        der_cmp(MvccKey::NextVersion, vec![0]);
+        der_cmp(MvccKey::TxnActive(1), vec![1,0,0,0,0,0,0,0,1]);
+        der_cmp(MvccKey::TxnWrite(1, vec![1,2,3]), vec![2, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 3, 0, 0]);
+        der_cmp(MvccKey::Version(b"abc".to_vec(), 11), vec![3, 97, 98, 99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 11]);        
     }
 }
