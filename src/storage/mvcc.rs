@@ -71,12 +71,12 @@ pub enum MvccKeyPrefix {
     Version(
         #[serde(with = "serde_bytes")]
         Vec<u8>
-    )
+    ),
 }
 
 impl MvccKeyPrefix {
-    pub fn encode(&self) -> Vec<u8> {
-        bincode::serialize(self).expect("Encode fail")
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        serialize_key(&self)
     }
 }
 
@@ -138,7 +138,7 @@ impl<E: Engine> MvccTransaction<E> {
         let mut delete_keys = Vec::new();
 
         // Get the current TxnWrite
-        let mut iter = engine.scan_prefix(MvccKeyPrefix::TxnWrite(self.state.version).encode());
+        let mut iter = engine.scan_prefix(MvccKeyPrefix::TxnWrite(self.state.version).encode()?);
         while let Some((key, _)) = iter.next().transpose()?{
             delete_keys.push(key);
         }
@@ -162,7 +162,7 @@ impl<E: Engine> MvccTransaction<E> {
         let mut delete_keys = Vec::new();
 
         // Find the current TxnWrite info
-        let mut iter = engine.scan_prefix(MvccKeyPrefix::TxnWrite(self.state.version).encode());
+        let mut iter = engine.scan_prefix(MvccKeyPrefix::TxnWrite(self.state.version).encode()?);
         while let Some((key, _)) = iter.next().transpose()? {
             match MvccKey::decode(key.clone())? {
                 MvccKey::TxnWrite(_, raw_key) => {
@@ -224,7 +224,7 @@ impl<E: Engine> MvccTransaction<E> {
     pub fn scan_prefix(&self, prefix: Vec<u8>) -> Result<Vec<ScanResult>> {
         let mut eng = self.engine.lock()?;
 
-        let mut enc_prefix = MvccKeyPrefix::Version(prefix).encode();
+        let mut enc_prefix = MvccKeyPrefix::Version(prefix).encode()?;
         
         // Original        Encode
         // 97 98 99     -> 97 98 99 0 0
@@ -252,7 +252,10 @@ impl<E: Engine> MvccTransaction<E> {
             }
         }
 
-        Ok(results.into_iter().map(|(key, value)| ScanResult {key, value}).collect())
+        Ok(results
+            .into_iter()
+            .map(|(key, value)| ScanResult {key, value})
+            .collect())
     }
 
     // -+------------------------+-
@@ -302,7 +305,7 @@ impl<E: Engine> MvccTransaction<E> {
     // Scan current active transactions
     fn scan_txnactive(engine: &mut MutexGuard<E>) -> Result<HashSet<Version>> {
         let mut active_versions = HashSet::new();
-        let mut iter = engine.scan_prefix(MvccKeyPrefix::TxnActive.encode());
+        let mut iter = engine.scan_prefix(MvccKeyPrefix::TxnActive.encode()?);
         while let Some((key, _)) = iter.next().transpose()? {
             match MvccKey::decode(key.clone())? {
                 MvccKey::TxnActive(version) => {
@@ -327,7 +330,334 @@ pub struct ScanResult {
 #[cfg(test)]
 
 mod tests {
-    
-    // 1. Get
 
+    use crate::{
+        error::Result, 
+        storage::{disk::DiskEngine, engine::Engine, memory::MemoryEngine}
+    };
+
+    use super::Mvcc;
+
+    // 1. Get
+    fn get(eng: impl Engine) -> Result<()> {
+        let mvcc = Mvcc::new(eng);
+        let tx = mvcc.begin()?;
+        tx.set(b"key1".to_vec(), b"value1".to_vec())?;
+        tx.set(b"key2".to_vec(), b"value2".to_vec())?;
+        tx.set(b"key3".to_vec(), b"value3".to_vec())?;
+        tx.set(b"key4".to_vec(), b"value4".to_vec())?;
+        tx.delete(b"key3".to_vec())?;
+        tx.commit()?;     
+
+        let tx1 = mvcc.begin()?;
+        assert_eq!(tx1.get(b"key1".to_vec())?, Some(b"value1".to_vec()));
+        assert_eq!(tx1.get(b"key2".to_vec())?, Some(b"value2".to_vec()));
+        assert_eq!(tx1.get(b"key3".to_vec())?, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get() -> Result<()> {
+        get(MemoryEngine::new())?;
+
+        let p = tempfile::tempdir()?.into_path().join("raydb-log");
+        get(DiskEngine::new(p.clone())?)?;
+        std::fs::remove_dir_all(p.parent().unwrap())?;
+        Ok(())
+    }
+
+
+    // 2. Get Isolation
+    fn get_isolation(eng: impl Engine) -> Result<()> {
+        let mvcc = Mvcc::new(eng);
+        let tx = mvcc.begin()?;
+        tx.set(b"a".to_vec(), b"[1,2,3]".to_vec())?;
+        tx.set(b"b".to_vec(), b"[2,3,4]".to_vec())?;
+        tx.set(b"c".to_vec(), b"[3,4,5]".to_vec())?;        
+        tx.set(b"d".to_vec(), b"[4,5,6]".to_vec())?;
+        tx.commit()?;
+
+        let tx1 = mvcc.begin()?;
+        tx1.set(b"a".to_vec(), b"[0,1,2]".to_vec())?;
+        // without commit, update fail, lock is held.
+
+        let tx2 = mvcc.begin()?;
+
+        let tx3 = mvcc.begin()?;
+        tx3.set(b"b".to_vec(), b"[7,8,9]".to_vec())?;
+        tx3.delete(b"c".to_vec())?;
+        tx3.commit()?;
+
+        let tx4 = mvcc.begin()?;
+
+        assert_eq!(tx2.get(b"a".to_vec())?, Some(b"[1,2,3]".to_vec()));
+        assert_eq!(tx2.get(b"b".to_vec())?, Some(b"[2,3,4]".to_vec()));
+        assert_eq!(tx2.get(b"c".to_vec())?, Some(b"[3,4,5]".to_vec()));
+        assert_eq!(tx2.get(b"d".to_vec())?, Some(b"[4,5,6]".to_vec()));
+
+        assert_eq!(tx4.get(b"a".to_vec())?, Some(b"[1,2,3]".to_vec()));
+        assert_eq!(tx4.get(b"b".to_vec())?, Some(b"[7,8,9]".to_vec()));
+        assert_eq!(tx4.get(b"c".to_vec())?, None);
+        assert_eq!(tx4.get(b"d".to_vec())?, Some(b"[4,5,6]".to_vec()));
+        Ok(())
+
+// 事务隔离机制
+// tx1 尝试更新 a，但未提交，因此变更未对其他事务生效，且持有锁。
+// 其他事务无法修改 a。
+
+// tx2 和 tx4 展示了隔离级别：
+// tx2 读取到事务 tx 提交后的数据。
+// tx4 读取到事务 tx3 提交后的数据，展示了最新的已提交状态。
+
+// 通过 MVCC，系统维护多个版本的数据，确保读取和写入互不干扰。
+
+    }
+
+    #[test]
+    fn test_get_isolation() -> Result<()> {
+        get_isolation(MemoryEngine::new())?;
+        
+        let p = tempfile::tempdir()?.into_path().join("raydb-log");
+        get_isolation(DiskEngine::new(p.clone())?)?;
+        std::fs::remove_dir_all(p.parent().unwrap())?; 
+        Ok(())
+    }
+
+
+    // 3. Scan Prefix
+    fn scan_prefix(eng: impl Engine) -> Result<()> {
+        let mvcc = Mvcc::new(eng);
+        let tx = mvcc.begin()?;
+        tx.set(b"aabb".to_vec(), b"val1".to_vec())?;
+        tx.set(b"abcc".to_vec(), b"val2".to_vec())?;
+        tx.set(b"bbaa".to_vec(), b"val3".to_vec())?;
+        tx.set(b"acca".to_vec(), b"val4".to_vec())?;
+        tx.set(b"aaca".to_vec(), b"val5".to_vec())?;
+        tx.set(b"bcca".to_vec(), b"val6".to_vec())?;
+        tx.commit()?;
+
+        let tx1 = mvcc.begin()?;
+
+        let iter3 = tx1.scan_prefix(b"bcca".to_vec())?;
+        assert_eq!(
+            iter3,
+            vec![super::ScanResult {
+                key: b"bcca".to_vec(),
+                value: b"val6".to_vec()
+            },]
+        );
+        
+        let iter1 = tx1.scan_prefix(b"bcca".to_vec())?;
+        assert_eq!(
+            iter1,
+            vec![
+                super::ScanResult {
+                    key: b"bcca".to_vec(),
+                    value: b"val6".to_vec()
+                },
+            ]
+        );
+
+        let iter2 = tx1.scan_prefix(b"aa".to_vec())?;
+        assert_eq!(
+            iter2,
+            vec![
+                super::ScanResult {
+                    key: b"aabb".to_vec(),
+                    value: b"val1".to_vec()
+                },
+                super::ScanResult {
+                    key: b"aaca".to_vec(),
+                    value: b"val5".to_vec()
+                },
+            ]
+        );
+
+        let iter3 = tx1.scan_prefix(b"a".to_vec())?;
+        assert_eq!(
+            iter3,
+            vec![
+                super::ScanResult {
+                    key: b"aabb".to_vec(),
+                    value: b"val1".to_vec()
+                },
+                super::ScanResult {
+                    key: b"aaca".to_vec(),
+                    value: b"val5".to_vec()
+                },
+                super::ScanResult {
+                    key: b"abcc".to_vec(),
+                    value: b"val2".to_vec()
+                },
+                super::ScanResult {
+                    key: b"acca".to_vec(),
+                    value: b"val4".to_vec()
+                },
+                ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_scan_prefix() -> Result<()> {
+        scan_prefix(MemoryEngine::new())?;
+
+        let p = tempfile::tempdir()?.into_path().join("raydb-log");
+        scan_prefix(DiskEngine::new(p.clone())?)?;
+        std::fs::remove_dir_all(p.parent().unwrap())?;
+
+        Ok(())
+    }
+
+    // 4. Scan Isolation
+    fn scan_isolation(eng: impl Engine) -> Result<()> {
+        let mvcc = Mvcc::new(eng);
+        let tx = mvcc.begin()?;
+        tx.set(b"aabb".to_vec(), b"val1".to_vec())?;
+        tx.set(b"abcc".to_vec(), b"val2".to_vec())?;
+        tx.set(b"bbaa".to_vec(), b"val3".to_vec())?;
+        tx.set(b"acca".to_vec(), b"val4".to_vec())?;
+        tx.set(b"aaca".to_vec(), b"val5".to_vec())?;
+        tx.set(b"bcca".to_vec(), b"val6".to_vec())?;
+        tx.commit()?;
+
+        let tx1 = mvcc.begin()?;
+        let tx2 = mvcc.begin()?;
+        tx2.set(b"acca".to_vec(), b"val4-1".to_vec())?;
+        tx2.set(b"aabb".to_vec(), b"val1-1".to_vec())?;
+        // not yet commit
+
+        let tx3 = mvcc.begin()?;
+        tx3.set(b"bbaa".to_vec(), b"val3-1".to_vec())?;  
+        tx3.delete(b"bcca".to_vec())?;
+        tx3.commit()?;
+
+        let iter1 = tx1.scan_prefix(b"aa".to_vec())?;
+        assert_eq!(
+            iter1,
+            vec![
+                super::ScanResult {
+                    key:b"aabb".to_vec(),
+                    value: b"val1".to_vec(),
+                },
+                super::ScanResult {
+                    key:b"aaca".to_vec(),
+                    value: b"val5".to_vec(),
+                },                
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_scan_isolation() -> Result<()> {
+        scan_isolation(MemoryEngine::new())?;
+
+        let p = tempfile::tempdir()?.into_path().join("raydb-log");
+        scan_isolation(DiskEngine::new(p.clone())?)?;
+        std::fs::remove_dir_all(p.parent().unwrap())?;
+        Ok(())
+    }
+
+    // 5. Set
+    fn set(eng: impl Engine) -> Result<()> {
+        let mvcc = Mvcc::new(eng);
+        let tx = mvcc.begin()?;
+        tx.set(b"key1".to_vec(), b"value1".to_vec())?;
+        tx.set(b"key2".to_vec(), b"value2".to_vec())?;
+        tx.set(b"key3".to_vec(), b"value3".to_vec())?;
+        tx.set(b"key4".to_vec(), b"value4".to_vec())?;
+        tx.set(b"key5".to_vec(), b"value5".to_vec())?;
+        tx.commit()?;
+
+        let tx1 = mvcc.begin()?;
+        let tx2 = mvcc.begin()?;
+
+        tx1.set(b"key1".to_vec(), b"val1-1".to_vec())?;
+        tx1.set(b"key2".to_vec(), b"val2-1".to_vec())?;
+        tx1.set(b"key2".to_vec(), b"val3-1".to_vec())?;
+
+        tx2.set(b"key3".to_vec(), b"haha3".to_vec())?;
+        tx2.set(b"key5".to_vec(), b"val5-1".to_vec())?;
+
+        tx1.commit()?;
+        tx2.commit()?;
+
+        // visible to previous txn number
+        let tx=mvcc.begin()?;
+        assert_eq!(tx.get(b"key1".to_vec())?,Some(b"val1-1".to_vec()));
+        assert_eq!(tx.get(b"key2".to_vec())?,Some(b"val3-1".to_vec()));
+        assert_eq!(tx.get(b"key3".to_vec())?,Some(b"haha3".to_vec()));
+        assert_eq!(tx.get(b"key5".to_vec())?,Some(b"val5-1".to_vec()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_set() -> Result<()> {
+        set(MemoryEngine::new())?;
+
+        let p = tempfile::tempdir()?.into_path().join("raydb-log");
+        set(DiskEngine::new(p.clone())?)?;
+        std::fs::remove_dir_all(p.parent().unwrap())?;
+        Ok(())
+    }
+
+    // 6. Set Conflict
+    fn set_conflict(eng: impl Engine) -> Result<()> {
+        let mvcc = Mvcc::new(eng);
+        let tx = mvcc.begin()?;
+        tx.set(b"key1".to_vec(), b"val1".to_vec())?;
+        tx.set(b"key2".to_vec(), b"val2".to_vec())?;
+        tx.set(b"key3".to_vec(), b"val3".to_vec())?;
+        tx.set(b"key4".to_vec(), b"val4".to_vec())?;
+        tx.set(b"key5".to_vec(), b"val5".to_vec())?;
+        tx.commit()?;        
+
+        let tx1 = mvcc.begin()?;
+        let tx2 = mvcc.begin()?;
+
+        tx1.set(b"key1".to_vec(), b"val1-1".to_vec())?;
+        assert_eq!(
+            tx2.set(b"key1".to_vec(), b"val1-3".to_vec()),
+            Err(super::Error::WriteConflict)
+        );
+
+        let tx3 = mvcc.begin()?;
+        tx3.set(b"key5".to_vec(), b"val5-2".to_vec())?;
+        tx3.commit()?;
+
+        assert_eq!(
+            tx1.set(b"key5".to_vec(), b"val5-3".to_vec()),
+            Err(super::Error::WriteConflict)
+        );
+
+        tx1.commit()?;
+        Ok(())
+    }
+
+
+// tx1 的写锁
+
+// 当 tx1 对 key1 执行 set 时，它会获取该键的写锁（或者记录它的意图写操作）。
+// 由于 tx1 尚未提交，因此其他事务（如 tx2）对 key1 的任何写操作都会发生冲突（WriteConflict）。
+
+// tx3 在 key5 上设置了新值，并提交后，这些变更对后续事务（如新的 tx4）可见。
+// 然而，tx1 是在 tx3 提交之前创建的事务，其事务视图（事务快照）只包含 tx3 提交之前的状态。
+// 如果 tx1 尝试修改 key5，它必须确保当前的值（val5-2）仍然与其事务视图一致。
+
+// 当 tx1 试图更新 key5 时，key5 的值已经被 tx3 修改为 val5-2。
+// 事务隔离机制会检测到 tx1 的事务视图中 key5 的值和当前存储引擎中的值不一致，从而导致 WriteConflict。
+
+    #[test]
+    fn test_set_conflict() -> Result<()> {
+        set_conflict(MemoryEngine::new())?;
+        
+        let p = tempfile::tempdir()?.into_path().join("raydb-log");
+        set_conflict(DiskEngine::new(p.clone())?)?;
+        std::fs::remove_dir_all(p.parent().unwrap())?;
+        Ok(())
+    }
 }
