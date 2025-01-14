@@ -336,7 +336,7 @@ mod tests {
         storage::{disk::DiskEngine, engine::Engine, memory::MemoryEngine}
     };
 
-    use super::Mvcc;
+    use super::{Mvcc, MvccKey};
 
     // 1. Get
     fn get(eng: impl Engine) -> Result<()> {
@@ -660,4 +660,248 @@ mod tests {
         std::fs::remove_dir_all(p.parent().unwrap())?;
         Ok(())
     }
+
+    // 7. delete
+    fn delete(eng: impl Engine) -> Result<()> {
+        let mvcc = Mvcc::new(eng);
+        let tx = mvcc.begin()?;
+        tx.set(b"key1".to_vec(), b"val1".to_vec())?;
+        tx.set(b"key2".to_vec(), b"val2".to_vec())?;
+        tx.set(b"key3".to_vec(), b"val3".to_vec())?;
+        tx.delete(b"key2".to_vec())?;
+        tx.delete(b"key3".to_vec())?;
+        tx.set(b"key3".to_vec(), b"val3-1".to_vec())?;
+        tx.commit()?;
+
+        let tx1 = mvcc.begin()?;
+        assert_eq!(tx1.get(b"key2".to_vec())?, None);
+
+        let iter = tx1.scan_prefix(b"ke".to_vec())?;
+        assert_eq!(
+            iter,
+            vec![
+                super::ScanResult {
+                    key: b"key1".to_vec(),
+                    value: b"val1".to_vec()
+                },
+                super::ScanResult {
+                    key: b"key3".to_vec(),
+                    value: b"val3-1".to_vec()
+                },               
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_delete() -> Result<()> {
+        delete(MemoryEngine::new())?;
+
+        let p = tempfile::tempdir()?.into_path().join("ray-db");
+        delete(DiskEngine::new(p.clone())?)?;
+        std::fs::remove_dir_all(p.parent().unwrap())?;
+        Ok(())
+    }
+
+
+    // 8. delete confilct
+    fn delete_conflict(eng:impl Engine) -> Result<()> {
+        let mvcc = Mvcc::new(eng);
+        let tx = mvcc.begin()?;
+        tx.set(b"key1".to_vec(), b"val1".to_vec())?;
+        tx.set(b"key2".to_vec(), b"val2".to_vec())?;
+        tx.commit()?;
+
+        let tx1 = mvcc.begin()?;
+        let tx2 = mvcc.begin()?;
+        tx1.delete(b"key1".to_vec())?;
+        tx1.set(b"key2".to_vec(), b"val2-1".to_vec())?;
+
+        assert_eq!(
+            tx2.delete(b"key1".to_vec()),
+            Err(super::Error::WriteConflict)
+        );
+
+        assert_eq!(
+            tx2.delete(b"key2".to_vec()),
+            Err(super::Error::WriteConflict)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_delete_conflict() -> Result<()> {
+        delete_conflict(MemoryEngine::new())?;
+        
+        let p = tempfile::tempdir()?.into_path().join("ray-db");
+        delete_conflict(DiskEngine::new(p.clone())?)?;
+        std::fs::remove_dir_all(p.parent().unwrap())?;
+        Ok(())
+    }
+
+
+    // 9. dirty-read
+    fn dirty_read(eng: impl Engine) -> Result<()> {
+        let mvcc = Mvcc::new(eng);
+        let tx = mvcc.begin()?;
+        tx.set(b"key1".to_vec(), b"val1".to_vec())?;
+        tx.set(b"key2".to_vec(), b"val2".to_vec())?;
+        tx.set(b"key3".to_vec(), b"val3".to_vec())?; 
+        tx.commit()?;
+
+        let tx1 = mvcc.begin()?;
+        let tx2 = mvcc.begin()?;
+
+        tx2.set(b"key1".to_vec(), b"val1-1".to_vec())?; // tx2 修改 key1 -> val1-1，但未提交
+        assert_eq!(tx1.get(b"key1".to_vec())?, Some(b"val1".to_vec())); // 验证 tx1 读取到的 key1 的值仍是 val1      
+        Ok(())
+    }
+
+    #[test]
+    fn test_dirty_read() -> Result<()> {
+        dirty_read(MemoryEngine::new())?;
+        let p = tempfile::tempdir()?.into_path().join("ray-db");
+        dirty_read(DiskEngine::new(p.clone())?)?;
+        std::fs::remove_dir_all(p.parent().unwrap())?;
+        Ok(())
+    }
+
+
+    // 10. Unrepeatable read
+    fn unrepeatable_read(eng: impl Engine) -> Result<()> {
+        let mvcc = Mvcc::new(eng);
+        let tx = mvcc.begin()?;
+        tx.set(b"key1".to_vec(), b"val1".to_vec())?;
+        tx.set(b"key2".to_vec(), b"val2".to_vec())?;
+        tx.set(b"key3".to_vec(), b"val3".to_vec())?; 
+        tx.commit()?;
+
+        let tx1 = mvcc.begin()?;
+        let tx2 = mvcc.begin()?;
+
+        tx2.set(b"key1".to_vec(), b"val1-1".to_vec())?;         
+        assert_eq!(tx1.get(b"key1".to_vec())?, Some(b"val1".to_vec()));
+        tx2.commit()?;
+        assert_eq!(tx1.get(b"key1".to_vec())?, Some(b"val1".to_vec()));
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_unrepeatable_read() -> Result<()> {
+        unrepeatable_read(MemoryEngine::new())?;
+        let p = tempfile::tempdir()?.into_path().join("ray-db");
+        unrepeatabler_read(DiskEngine::new(p.clone())?)?;
+        std::fs::remove_dir_all(p.parent().unwrap())?;
+        Ok(())
+    }
+
+// 不可重复读 (Unrepeatable Read)： 不可重复读是指在同一事务中，连续两次读取同一数据的值不一致。这通常发生在一个事务正在读取某条记录，而另一个事务修改并提交了该记录的情况下。
+// 验证不可重复读：
+// 在 tx1 中第一次读取 key1 得到 val1。
+// 在 tx2 提交 key1 的新值 val1-1 后，tx1 再次读取 key1 的值。
+// 如果第二次读取到的值不是 val1，说明系统没有阻止不可重复读。
+
+    // 11. Phantom read
+    fn phantom_read(eng: impl Engine) -> Result<()> {
+        let mvcc = Mvcc::new(eng);
+        let tx = mvcc.begin()?;
+        tx.set(b"key1".to_vec(), b"val1".to_vec())?;
+        tx.set(b"key2".to_vec(), b"val2".to_vec())?;
+        tx.set(b"key3".to_vec(), b"val3".to_vec())?; 
+        tx.commit()?;
+
+        let tx1 = mvcc.begin()?;
+        let tx2 = mvcc.begin()?;
+
+        let iter1 = tx1.scan_prefix(b"key".to_vec())?;
+        assert_eq!(
+            iter1,
+            vec![
+                super::ScanResult {
+                    key: b"key1".to_vec(),
+                    value: b"val1".to_vec(),
+                },
+                super::ScanResult {
+                    key: b"key2".to_vec(),
+                    value: b"val2".to_vec(),
+                },
+                super::ScanResult {
+                    key: b"key3".to_vec(),
+                    value: b"val3".to_vec(),
+                },                
+            ]
+        );
+
+        tx2.set(b"key2".to_vec(), b"val2-1".to_vec())?;
+        tx2.set(b"key4".to_vec(), b"val4".to_vec())?;
+        tx2.commit()?;
+
+        let iter1 = tx1.scan_prefix(b"key".to_vec())?;
+        assert_eq!(
+            iter1,
+            vec![
+                super::ScanResult {
+                    key: b"key1".to_vec(),
+                    value: b"val1".to_vec(),
+                },
+                super::ScanResult {
+                    key: b"key2".to_vec(),
+                    value: b"val2".to_vec(),
+                },
+                super::ScanResult {
+                    key: b"key3".to_vec(),
+                    value: b"val3".to_vec(),
+                },                
+            ]
+        );        
+
+        Ok(())
+    }
+    #[test]
+    fn test_phantom_read() -> Result<()> {
+        phantom_read(MemoryEngine::new())?;
+        let p = tempfile::tempdir()?.into_path().join("ray-db");
+        phantom_read(DiskEngine::new(p.clone())?)?;
+        std::fs::remove_dir_all(p.parent().unwrap())?;
+        Ok(())
+    } 
+
+// 幻读 (Phantom Read)：
+
+// 幻读是一种事务隔离问题，指一个事务两次执行同一查询，但第二次查询返回了第一次未包含的记录（例如新插入的数据）。
+// 在这里，tx1 的查询应该保持一致性，不能受到 tx2 插入或修改记录的影响。
+
+
+    // 12. rollback
+    fn rollback(eng: impl Engine) -> Result<()> {
+        let mvcc = Mvcc::new(eng);
+        let tx = mvcc.begin()?;
+        tx.set(b"key1".to_vec(), b"val1".to_vec())?;
+        tx.set(b"key2".to_vec(), b"val2".to_vec())?;
+        tx.set(b"key3".to_vec(), b"val3".to_vec())?; 
+        tx.commit()?;
+
+        let tx1 = mvcc.begin()?;   
+        tx1.set(b"key1".to_vec(), b"val1-1".to_vec())?;
+        tx1.set(b"key2".to_vec(), b"val2-1".to_vec())?;
+        tx1.set(b"key3".to_vec(), b"val3-1".to_vec())?;   
+        tx1.rollback()?;
+
+        let tx2 = mvcc.begin()?;
+        assert_eq!(tx2.get(b"key1".to_vec())?, Some(b"val1".to_vec()));        
+        assert_eq!(tx2.get(b"key2".to_vec())?, Some(b"val2".to_vec()));
+        assert_eq!(tx2.get(b"key3".to_vec())?, Some(b"val3".to_vec()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_rollback() -> Result<()> {
+        rollback(MemoryEngine::new())?;
+        let p = tempfile::tempdir()?.into_path().join("ray-db");
+        rollback(DiskEngine::new(p.clone())?)?;
+        std::fs::remove_dir_all(p.parent().unwrap())?;
+        Ok(())
+    } 
 }
