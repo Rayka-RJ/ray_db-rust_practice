@@ -18,6 +18,7 @@ pub struct Column {
     pub datatype: DataTypes,
     pub nullable: Option<bool>,
     pub default: Option<Expression>,
+    pub primary_key: bool,
 }
 
 #[derive(Debug, PartialEq)]

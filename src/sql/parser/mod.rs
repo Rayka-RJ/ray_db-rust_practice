@@ -139,6 +139,7 @@ impl<'a> Parser<'a> {
             },
             nullable: None,
             default: None,
+            primary_key: false,
         };
 
         // Nullable or Default
