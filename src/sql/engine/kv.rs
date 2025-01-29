@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::{error::{Error, Result}, sql::{schema::Table, types::{Row, Value}}, storage::{self, engine::Engine as StorageEngine}};
+use crate::{error::{Error, Result}, sql::{schema::Table, types::{Row, Value}}, storage::{self, engine::Engine as StorageEngine, keycode::serialize_key}};
 use super::{Engine, Transaction};
 
 pub struct KVEngine<E: StorageEngine> {
@@ -42,11 +42,11 @@ impl<E: StorageEngine> KVTransaction<E> {
     
 impl<E: StorageEngine> Transaction for KVTransaction<E> {
     fn commit(&self) -> Result<()> {
-        Ok(())
+        self.txn.commit()
     }
 
     fn rollback(&self) -> Result<()> {
-        Ok(())
+        self.txn.rollback()
     }
 
     fn create_row(&mut self, table_name: String, row: Row) -> Result<()> {
@@ -61,18 +61,26 @@ impl<E: StorageEngine> Transaction for KVTransaction<E> {
             }
         }
 
+        // find the primary key
+        let pk = table.get_primary_key(&row)?;
+        // check data conflict with primary key
+        let id = Key::Row(table_name.clone(), pk.clone()).encode()?;
+        if self.txn.get(id.clone())?.is_some() {
+            return Err(Error::Internal(format!("Duplicate data for primary key {} in table {}", pk, table_name)));
+        }
+
         // insert the data
         // (Temporarily) (todo) set the first row as the primary key
         let id = Key::Row(table_name.clone(), row[0].clone());
         let value = bincode::serialize(&row)?;
-        self.txn.set(bincode::serialize(&id)?, value)?;
+        self.txn.set(bincode::serialize(&id)?, value)?; 
 
         Ok(())
     }
 
     fn scan_table(&mut self, table_name: String) -> Result<Vec<Row>> {
-        let prefix = KeyPrefix::Row(table_name.clone());
-        let results = self.txn.scan_prefix(bincode::serialize(&prefix)?)?;
+        let prefix = KeyPrefix::Row(table_name.clone()).encode()?;
+        let results = self.txn.scan_prefix(prefix)?;
         let mut rows = Vec::new();
         for result in results {
             let row: Row = bincode::deserialize(&result.value)?;
@@ -85,23 +93,20 @@ impl<E: StorageEngine> Transaction for KVTransaction<E> {
         // Check if it exists
         if self.get_table(table.name.clone())?.is_some() {
             return Err(Error::Internal(format!("Table {} already exists", table.name)));
-        } 
+        }         
+        
+        table.validate()?;
 
-        // Check if table is valid
-        if table.columns.is_empty() {
-            return Err(Error::Internal(format!("table {} has no column", table.name)));
-        }
-
-        let key = Key::Table(table.name.clone());
+        let key = Key::Table(table.name.clone()).encode()?;
         let val = bincode::serialize(&table)?;
-        self.txn.set(bincode::serialize(&key)?, val)?;
+        self.txn.set(key, val)?;
 
         Ok(())
     }
 
     fn get_table(&self, table_name: String) -> Result<Option<Table>> {
-        let key = Key::Table(table_name);
-        Ok(self.txn.get(bincode::serialize(&key)?)?
+        let key = Key::Table(table_name).encode()?;
+        Ok(self.txn.get(key)?
         .map(|c|bincode::deserialize(&c)).transpose()?)
     }
 }
@@ -112,10 +117,22 @@ pub enum Key {
     Row(String, Value),
 }
 
+impl Key {
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        serialize_key(self)
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 enum KeyPrefix {
     Table,
     Row(String),
+}
+
+impl KeyPrefix {
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        serialize_key(self)
+    }
 }
 
 #[cfg(test)]
@@ -131,7 +148,7 @@ mod tests {
 
         // (temporarily - todo) The first column (a) is default primary key
         s.execute("CREATE TABLE t1 (
-        a integer, 
+        a integer primary key, 
         b int,
         c varchar default 'apple');")?; 
 

@@ -151,6 +151,10 @@ impl<'a> Parser<'a> {
                     column.nullable = Some(false);
                 },
                 Keyword::Default => column.default = Some(self.parse_expression()?),
+                Keyword::Primary => {
+                    self.next_expect(Token::Keyword(Keyword::Key))?;
+                    column.primary_key = true;
+                }
                 k => return Err(Error::Parse(format!("[Parser] Unexcepted keyword {}", k))),
             }
         }

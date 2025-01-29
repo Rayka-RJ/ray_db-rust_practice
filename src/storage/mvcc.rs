@@ -792,7 +792,7 @@ mod tests {
     fn test_unrepeatable_read() -> Result<()> {
         unrepeatable_read(MemoryEngine::new())?;
         let p = tempfile::tempdir()?.into_path().join("ray-db");
-        unrepeatabler_read(DiskEngine::new(p.clone())?)?;
+        unrepeatable_read(DiskEngine::new(p.clone())?)?;
         std::fs::remove_dir_all(p.parent().unwrap())?;
         Ok(())
     }

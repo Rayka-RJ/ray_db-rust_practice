@@ -1,4 +1,4 @@
-use std::{array::TryFromSliceError, fmt::Display, sync::PoisonError};
+use std::{array::TryFromSliceError, fmt::Display, string::FromUtf8Error, sync::PoisonError};
 
 use bincode::ErrorKind;
 use serde::{de, ser};
@@ -60,6 +60,12 @@ impl From<TryFromSliceError> for Error {
 }
 
 // Serde Error implement
+
+impl From<FromUtf8Error> for Error {
+    fn from(value: FromUtf8Error) -> Self {
+        Error::Internal(value.to_string())
+    }
+}
 
 impl std::error::Error for Error {}
 
